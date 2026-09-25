@@ -1,6 +1,7 @@
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { logger } from "firebase-functions";
 import { auth, db } from "../firebaseAdmin";
+import { isNotificationsEnabled } from "../preferences";
 import { mailCollection } from "./queue";
 import { sendWithResend, SendError } from "./sender";
 import type { MailDoc, SenderConfig } from "./types";
@@ -26,13 +27,13 @@ async function resolveRecipient(mail: MailDoc): Promise<{ email?: string; reason
     return mail.to ? { email: mail.to } : { reason: "no_recipient" };
   }
 
-  const user = await db.collection("users").doc(mail.toUid).get();
-
-  if (mail.category !== "account" && user.get("emailNotifications") === false) {
+  if (mail.category !== "account" && !(await isNotificationsEnabled(mail.toUid))) {
     return { reason: "opted_out" };
   }
 
   if (mail.to) return { email: mail.to };
+
+  const user = await db.collection("users").doc(mail.toUid).get();
 
   const email: unknown = user.get("email");
   if (typeof email === "string" && email.includes("@")) return { email };

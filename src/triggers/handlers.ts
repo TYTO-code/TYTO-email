@@ -1,8 +1,15 @@
 import type { DocumentData } from "firebase-admin/firestore";
+import { logger } from "firebase-functions";
+import { auth } from "../firebaseAdmin";
 import { enqueueMail, enqueueRateLimitedMail } from "../mail/queue";
+import { generatePasswordLink } from "../passwordLink";
 import {
+  googleWelcomeEmail,
+  loginEmailChangedNewEmail,
+  loginEmailChangedOldEmail,
   notificationEmail,
   reactivationEmail,
+  recruitWelcomeEmail,
   suspensionEmail,
   welcomeEmail,
 } from "../templates";
@@ -51,18 +58,48 @@ export async function handleNotificationCreated(
   );
 }
 
+/**
+ * Boas-vindas conforme o jeito que a conta foi criada:
+ * - recrutado pelo admin (conta com senha): link para criar a própria senha,
+ *   assim a senha provisória não precisa ser repassada;
+ * - login com Google: como entrar;
+ * - Auth indisponível: boas-vindas genéricas.
+ */
 export async function handleUserCreated(uid: string, data: DocumentData | undefined, appUrl: string) {
   if (!data) return;
+
+  const name = displayName(data);
+  let rendered = welcomeEmail({ name, appUrl });
+
+  try {
+    const authUser = await auth.getUser(uid);
+    const providers = authUser.providerData.map((provider) => provider.providerId);
+
+    if (authUser.email && providers.includes("password")) {
+      rendered = recruitWelcomeEmail({
+        name,
+        email: authUser.email,
+        setPasswordLink: await generatePasswordLink(authUser.email, appUrl),
+      });
+    } else if (authUser.email && providers.includes("google.com")) {
+      rendered = googleWelcomeEmail({ name, email: authUser.email, appUrl });
+    }
+  } catch (err) {
+    logger.warn("Boas-vindas sem dados do Auth", { uid, error: (err as Error).message });
+  }
 
   await enqueueMail(`welcome_${uid}`, {
     toUid: uid,
     category: "account",
     source: { type: "user", id: uid },
-    ...welcomeEmail({ name: displayName(data), appUrl }),
+    ...rendered,
   });
 }
 
-/** Avisa quando a conta é suspensa (`suspended` vira true) ou reativada. */
+/**
+ * E-mails de conta disparados por mudanças em `users/{uid}`:
+ * troca do e-mail de login e suspensão/reativação.
+ */
 export async function handleUserUpdated(
   uid: string,
   eventId: string,
@@ -72,6 +109,51 @@ export async function handleUserUpdated(
 ) {
   if (!before || !after) return;
 
+  await notifyLoginEmailChange(uid, eventId, before, after, appUrl);
+  await notifySuspensionChange(uid, eventId, before, after, appUrl);
+}
+
+const normalizeEmail = (value: unknown) =>
+  typeof value === "string" && value.includes("@") ? value.trim().toLowerCase() : null;
+
+/** Avisa o endereço ANTIGO (alerta de segurança) e confirma no novo. */
+async function notifyLoginEmailChange(
+  uid: string,
+  eventId: string,
+  before: DocumentData,
+  after: DocumentData,
+  appUrl: string
+) {
+  const oldEmail = normalizeEmail(before.email);
+  const newEmail = normalizeEmail(after.email);
+
+  if (!oldEmail || !newEmail || oldEmail === newEmail) return;
+
+  const name = displayName(after);
+  const source = { type: "user", id: uid };
+
+  await enqueueMail(`email_changed_old_${eventId}`, {
+    to: oldEmail,
+    category: "account",
+    source,
+    ...loginEmailChangedOldEmail({ name, newEmail }),
+  });
+
+  await enqueueMail(`email_changed_new_${eventId}`, {
+    to: newEmail,
+    category: "account",
+    source,
+    ...loginEmailChangedNewEmail({ name, appUrl }),
+  });
+}
+
+async function notifySuspensionChange(
+  uid: string,
+  eventId: string,
+  before: DocumentData,
+  after: DocumentData,
+  appUrl: string
+) {
   const wasSuspended = before.suspended === true;
   const isSuspended = after.suspended === true;
 

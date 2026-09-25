@@ -15,13 +15,19 @@ POST /api/email/broadcast ─┘        └── sweepMail (a cada 10 min: nova
 | E-mail | Gatilho | Categoria |
 | --- | --- | --- |
 | Espelho de notificação | doc novo em `notifications` | `notification` |
-| Boas-vindas | doc novo em `users` | `account` |
+| Boas-vindas (recrutado: link para criar a senha; Google: como entrar) | doc novo em `users` | `account` |
+| E-mail de login alterado (alerta no antigo + confirmação no novo) | `users/{uid}.email` muda | `account` |
 | Conta suspensa / reativada | `users/{uid}.suspended` muda | `account` |
+| Redefinição de senha | `POST /api/email/password-reset` | `account` |
 | Comunicado do Conselho | `POST /api/email/broadcast` (admin) | `broadcast` |
 
+Toda a regra de e-mail mora aqui: o frontend só chama a API e renderiza o que
+ela devolve (inclusive rótulos das preferências e mensagens de resultado).
+
 - **Destinatário:** `users/{uid}.email`; se não tiver, o e-mail do Firebase Auth.
-- **Opt-out:** `users/{uid}.emailNotifications === false` bloqueia `notification`
-  e `broadcast`. E-mails de conta são sempre enviados.
+- **Preferências:** `email_preferences/{uid}.notifications === false` bloqueia
+  `notification` e `broadcast` (via `GET/PUT /api/email/preferences`). E-mails de
+  conta são sempre enviados.
 - **Proteção contra abuso:** as regras do Firestore deixam qualquer membro criar
   notificação para qualquer pessoa. Por isso o conteúdo é escapado no template,
   `userId: 'all'` não vira e-mail e cada membro recebe no máximo
@@ -44,6 +50,19 @@ Outros backends podem enfileirar e-mails gravando direto em `mail` com
 `{ to? , toUid?, category, subject, html, text, status: "pending", attempts: 0, createdAt }`.
 A coleção não tem regra no `firestore.rules`, então só o Admin SDK acessa.
 
+## API (`emailApi`)
+
+Base: `https://<região>-<projeto>.cloudfunctions.net/emailApi`. Respostas no
+envelope `{ success: true, data }` / `{ success: false, message }` (pt-BR).
+
+| Rota | Auth | Descrição |
+| --- | --- | --- |
+| `POST /api/email/password-reset` `{ email }` | pública | Envia o link de nova senha. Resposta idêntica exista ou não a conta; limite de 3/h por e-mail e 10/h por IP (429). |
+| `GET /api/email/preferences` | membro | `{ preferences: [{ key, label, description, enabled }] }` |
+| `PUT /api/email/preferences` `{ notifications }` | membro | Salva e devolve o mesmo formato do GET. |
+| `GET /api/email/broadcast/recipients` | admin | `{ recipients: [{ uid, name, email, receivesEmail }] }` |
+| `POST /api/email/broadcast` | admin | Ver abaixo. |
+
 ## Comunicado do Conselho
 
 ```
@@ -52,8 +71,9 @@ Authorization: Bearer <Firebase ID token de um admin>
 { "subject": "Assembleia sábado", "message": "Texto.\n\nOutro parágrafo.", "userIds": ["opcional"] }
 ```
 
-Sem `userIds`, vai para todos os membros. Resposta:
-`{ "success": true, "data": { "broadcastId": "...", "queued": 42 } }`.
+Sem `userIds`, vai para todos os membros; quem desativou os e-mails não entra
+na fila. Resposta:
+`{ "success": true, "data": { "broadcastId": "...", "queued": 41, "skippedOptedOut": 1, "message": "Comunicado enviado: ..." } }`.
 Cada envio fica registrado em `mail_broadcasts`.
 
 ## Configuração e deploy
@@ -62,7 +82,9 @@ Cada envio fica registrado em `mail_broadcasts`.
 2. `firebase functions:secrets:set RESEND_API_KEY`
 3. `cp .env.example .env` e ajuste. **`FUNCTIONS_REGION` precisa ser a mesma
    localização do banco Firestore.**
-4. `npm install && npm run deploy`
+4. No Firebase Auth, adicione o domínio de `APP_URL` em "Domínios autorizados"
+   (para o link de senha voltar ao login do app; sem isso ele usa a página padrão do Firebase).
+5. `npm install && npm run deploy`
 
 O codebase `tyto-email` é separado, então o deploy não mexe em outras functions do projeto.
 

@@ -1,9 +1,19 @@
+import { randomUUID } from "node:crypto";
 import express, { NextFunction, Request, Response } from "express";
 import cors from "cors";
 import { FieldValue } from "firebase-admin/firestore";
+import { logger } from "firebase-functions";
 import { auth, db } from "../firebaseAdmin";
-import { buildMailDoc, mailCollection } from "../mail/queue";
-import { broadcastEmail } from "../templates";
+import { buildMailDoc, enqueueMail, mailCollection } from "../mail/queue";
+import { consumeQuota, hashKey } from "../mail/rateLimit";
+import { generatePasswordLink } from "../passwordLink";
+import {
+  describePreferences,
+  isNotificationsEnabled,
+  listOptedOutUids,
+  setNotificationsEnabled,
+} from "../preferences";
+import { broadcastEmail, passwordResetEmail } from "../templates";
 
 interface AuthenticatedRequest extends Request {
   uid?: string;
@@ -11,6 +21,12 @@ interface AuthenticatedRequest extends Request {
 
 const MAX_SUBJECT = 150;
 const MAX_MESSAGE = 5000;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const RESET_PER_EMAIL_PER_HOUR = 3;
+const RESET_PER_IP_PER_HOUR = 10;
+
+const PASSWORD_RESET_MESSAGE =
+  "Se existir uma conta com esse e-mail, você vai receber em instantes um link para criar uma nova senha.";
 
 async function authenticate(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   try {
@@ -29,28 +45,152 @@ async function authenticate(req: AuthenticatedRequest, res: Response, next: Next
   }
 }
 
+async function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  try {
+    const requester = await db.collection("users").doc(req.uid!).get();
+
+    if (requester.get("admin") !== true) {
+      return fail(res, 403, "Somente o Conselho pode fazer isso.");
+    }
+
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
 const fail = (res: Response, status: number, message: string) =>
   res.status(status).json({ success: false, message });
+
+const ok = (res: Response, data: unknown, status = 200) => res.status(status).json({ success: true, data });
+
+const plural = (count: number, singular: string, pluralForm: string) =>
+  `${count} ${count === 1 ? singular : pluralForm}`;
 
 export function createApp(getAppUrl: () => string) {
   const app = express();
 
+  // Atrás do proxy do Google: req.ip passa a ser o IP real do cliente.
+  app.set("trust proxy", true);
   app.use(cors());
   app.use(express.json({ limit: "100kb" }));
 
-  /**
-   * POST /api/email/broadcast — comunicado do Conselho por e-mail.
-   * Body: { subject: string; message: string; userIds?: string[] }
-   * Sem `userIds`, vai para todos os membros (quem desativou e-mails não recebe).
-   */
-  app.post("/api/email/broadcast", authenticate, async (req: AuthenticatedRequest, res) => {
-    try {
-      const requester = await db.collection("users").doc(req.uid!).get();
+  // -------------------------------------------------------------------------
+  // Recuperação de senha (pública)
+  // -------------------------------------------------------------------------
 
-      if (requester.get("admin") !== true) {
-        return fail(res, 403, "Somente o Conselho pode enviar comunicados por e-mail.");
+  /**
+   * POST /api/email/password-reset — Body: { email }
+   * Sempre responde a mesma mensagem, exista a conta ou não (não revela
+   * quem é membro). Limite: 3 pedidos por e-mail e 10 por IP, por hora.
+   */
+  app.post("/api/email/password-reset", async (req, res, next) => {
+    try {
+      const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+
+      if (!EMAIL_REGEX.test(email)) {
+        return fail(res, 400, "Informe um e-mail válido.");
       }
 
+      const withinIpLimit = await consumeQuota(`reset_ip_${hashKey(req.ip ?? "unknown")}`, RESET_PER_IP_PER_HOUR);
+      const withinEmailLimit =
+        withinIpLimit && (await consumeQuota(`reset_email_${hashKey(email)}`, RESET_PER_EMAIL_PER_HOUR));
+
+      if (!withinIpLimit || !withinEmailLimit) {
+        return fail(res, 429, "Muitas tentativas. Aguarde um pouco e tente novamente.");
+      }
+
+      try {
+        const user = await auth.getUserByEmail(email);
+        const profile = await db.collection("users").doc(user.uid).get();
+        const name = profile.get("name") || user.displayName || "membro";
+
+        await enqueueMail(`password_reset_${randomUUID()}`, {
+          to: email,
+          toUid: user.uid,
+          category: "account",
+          source: { type: "password_reset", id: user.uid },
+          ...passwordResetEmail({ name, link: await generatePasswordLink(email, getAppUrl()) }),
+        });
+      } catch (err: any) {
+        if (err?.code !== "auth/user-not-found" && err?.code !== "auth/email-not-found") throw err;
+      }
+
+      return ok(res, { message: PASSWORD_RESET_MESSAGE });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Preferências do membro
+  // -------------------------------------------------------------------------
+
+  /** GET /api/email/preferences — preferências já com rótulos para renderizar. */
+  app.get("/api/email/preferences", authenticate, async (req: AuthenticatedRequest, res, next) => {
+    try {
+      return ok(res, describePreferences(await isNotificationsEnabled(req.uid!)));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /** PUT /api/email/preferences — Body: { notifications: boolean } */
+  app.put("/api/email/preferences", authenticate, async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const { notifications } = req.body ?? {};
+
+      if (typeof notifications !== "boolean") {
+        return fail(res, 400, "Preferência inválida.");
+      }
+
+      await setNotificationsEnabled(req.uid!, notifications);
+
+      return ok(res, describePreferences(notifications));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Comunicado do Conselho (admin)
+  // -------------------------------------------------------------------------
+
+  /** GET /api/email/broadcast/recipients — membros que podem receber o comunicado. */
+  app.get(
+    "/api/email/broadcast/recipients",
+    authenticate,
+    requireAdmin,
+    async (_req: AuthenticatedRequest, res, next) => {
+      try {
+        const [users, optedOut] = await Promise.all([
+          db.collection("users").select("name", "email").get(),
+          listOptedOutUids(),
+        ]);
+
+        const recipients = users.docs
+          .map((doc) => ({
+            uid: doc.id,
+            name: doc.get("name") || doc.get("email") || "Sem nome",
+            email: doc.get("email") ?? null,
+            receivesEmail: !optedOut.has(doc.id),
+          }))
+          .sort((a, b) => String(a.name).localeCompare(String(b.name), "pt-BR"));
+
+        return ok(res, { recipients });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  /**
+   * POST /api/email/broadcast — Body: { subject, message, userIds? }
+   * Sem `userIds`, vai para todos os membros. Quem desativou os e-mails de
+   * notificação não entra na fila.
+   */
+  app.post("/api/email/broadcast", authenticate, requireAdmin, async (req: AuthenticatedRequest, res, next) => {
+    try {
       const { subject, message, userIds } = req.body ?? {};
 
       if (typeof subject !== "string" || !subject.trim()) {
@@ -73,15 +213,19 @@ export function createApp(getAppUrl: () => string) {
         userIds !== undefined &&
         (!Array.isArray(userIds) || userIds.length === 0 || !userIds.every((id) => typeof id === "string" && id.trim()))
       ) {
-        return fail(res, 400, "Lista de destinatários inválida.");
+        return fail(res, 400, "Escolha pelo menos um membro.");
       }
 
-      const recipients: string[] = userIds
+      const audience: string[] = userIds
         ? [...new Set<string>(userIds)]
         : (await db.collection("users").select().get()).docs.map((doc) => doc.id);
 
+      const optedOut = await listOptedOutUids();
+      const recipients = audience.filter((uid) => !optedOut.has(uid));
+      const skippedOptedOut = audience.length - recipients.length;
+
       if (recipients.length === 0) {
-        return fail(res, 400, "Nenhum destinatário encontrado.");
+        return fail(res, 400, "Nenhum dos membros escolhidos recebe e-mails de comunicado.");
       }
 
       const broadcastRef = db.collection("mail_broadcasts").doc();
@@ -91,8 +235,9 @@ export function createApp(getAppUrl: () => string) {
         subject: rendered.subject,
         message: message.trim(),
         sentBy: req.uid,
-        recipients: recipients.length,
         allMembers: !userIds,
+        queued: recipients.length,
+        skippedOptedOut,
         createdAt: FieldValue.serverTimestamp(),
       });
 
@@ -105,13 +250,19 @@ export function createApp(getAppUrl: () => string) {
       }
       await writer.close();
 
-      return res.status(201).json({
-        success: true,
-        data: { broadcastId: broadcastRef.id, queued: recipients.length },
-      });
+      const summary =
+        `Comunicado enviado: ${plural(recipients.length, "e-mail na fila", "e-mails na fila")}.` +
+        (skippedOptedOut > 0
+          ? ` ${plural(skippedOptedOut, "membro desativou", "membros desativaram")} os e-mails e não vai receber.`
+          : "");
+
+      return ok(
+        res,
+        { broadcastId: broadcastRef.id, queued: recipients.length, skippedOptedOut, message: summary },
+        201
+      );
     } catch (err) {
-      console.error(err);
-      return fail(res, 500, "Algo deu errado no servidor. Tente novamente em instantes.");
+      next(err);
     }
   });
 
@@ -122,7 +273,7 @@ export function createApp(getAppUrl: () => string) {
       return fail(res, 400, "Dados da requisição inválidos.");
     }
 
-    console.error(err);
+    logger.error(err);
     return fail(res, 500, "Algo deu errado no servidor. Tente novamente em instantes.");
   });
 
