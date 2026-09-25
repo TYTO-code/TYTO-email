@@ -13,6 +13,7 @@ import {
   listOptedOutUids,
   setNotificationsEnabled,
 } from "../preferences";
+import { MessageKey, resolveLocale, t } from "../i18n";
 import { broadcastEmail, passwordResetEmail } from "../templates";
 
 interface AuthenticatedRequest extends Request {
@@ -25,15 +26,12 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const RESET_PER_EMAIL_PER_HOUR = 3;
 const RESET_PER_IP_PER_HOUR = 10;
 
-const PASSWORD_RESET_MESSAGE =
-  "Se existir uma conta com esse e-mail, você vai receber em instantes um link para criar uma nova senha.";
-
 async function authenticate(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   try {
     const authHeader = req.headers.authorization;
 
     if (!authHeader?.startsWith("Bearer ")) {
-      return res.status(401).json({ success: false, message: "Você precisa estar autenticado." });
+      return fail(req, res, 401, "notAuthenticated");
     }
 
     const decoded = await auth.verifyIdToken(authHeader.split("Bearer ")[1]);
@@ -41,7 +39,7 @@ async function authenticate(req: AuthenticatedRequest, res: Response, next: Next
 
     next();
   } catch {
-    return res.status(401).json({ success: false, message: "Sua sessão expirou. Entre novamente." });
+    return fail(req, res, 401, "sessionExpired");
   }
 }
 
@@ -50,7 +48,7 @@ async function requireAdmin(req: AuthenticatedRequest, res: Response, next: Next
     const requester = await db.collection("users").doc(req.uid!).get();
 
     if (requester.get("admin") !== true) {
-      return fail(res, 403, "Somente o Conselho pode fazer isso.");
+      return fail(req, res, 403, "councilOnly");
     }
 
     next();
@@ -59,13 +57,16 @@ async function requireAdmin(req: AuthenticatedRequest, res: Response, next: Next
   }
 }
 
-const fail = (res: Response, status: number, message: string) =>
-  res.status(status).json({ success: false, message });
+/** Erro no envelope padrão, com a mensagem no idioma do usuário. */
+const fail = async (
+  req: Request,
+  res: Response,
+  status: number,
+  key: MessageKey,
+  params?: Record<string, string | number>
+) => res.status(status).json({ success: false, message: t(await resolveLocale(req), key, params) });
 
 const ok = (res: Response, data: unknown, status = 200) => res.status(status).json({ success: true, data });
-
-const plural = (count: number, singular: string, pluralForm: string) =>
-  `${count} ${count === 1 ? singular : pluralForm}`;
 
 export function createApp(getAppUrl: () => string) {
   const app = express();
@@ -89,7 +90,7 @@ export function createApp(getAppUrl: () => string) {
       const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
 
       if (!EMAIL_REGEX.test(email)) {
-        return fail(res, 400, "Informe um e-mail válido.");
+        return fail(req, res, 400, "invalidEmail");
       }
 
       const withinIpLimit = await consumeQuota(`reset_ip_${hashKey(req.ip ?? "unknown")}`, RESET_PER_IP_PER_HOUR);
@@ -97,7 +98,7 @@ export function createApp(getAppUrl: () => string) {
         withinIpLimit && (await consumeQuota(`reset_email_${hashKey(email)}`, RESET_PER_EMAIL_PER_HOUR));
 
       if (!withinIpLimit || !withinEmailLimit) {
-        return fail(res, 429, "Muitas tentativas. Aguarde um pouco e tente novamente.");
+        return fail(req, res, 429, "tooManyAttempts");
       }
 
       try {
@@ -116,7 +117,7 @@ export function createApp(getAppUrl: () => string) {
         if (err?.code !== "auth/user-not-found" && err?.code !== "auth/email-not-found") throw err;
       }
 
-      return ok(res, { message: PASSWORD_RESET_MESSAGE });
+      return ok(res, { message: t(await resolveLocale(req), "passwordResetSent") });
     } catch (err) {
       next(err);
     }
@@ -129,7 +130,8 @@ export function createApp(getAppUrl: () => string) {
   /** GET /api/email/preferences — preferências já com rótulos para renderizar. */
   app.get("/api/email/preferences", authenticate, async (req: AuthenticatedRequest, res, next) => {
     try {
-      return ok(res, describePreferences(await isNotificationsEnabled(req.uid!)));
+      const [enabled, locale] = await Promise.all([isNotificationsEnabled(req.uid!), resolveLocale(req)]);
+      return ok(res, describePreferences(enabled, locale));
     } catch (err) {
       next(err);
     }
@@ -141,12 +143,12 @@ export function createApp(getAppUrl: () => string) {
       const { notifications } = req.body ?? {};
 
       if (typeof notifications !== "boolean") {
-        return fail(res, 400, "Preferência inválida.");
+        return fail(req, res, 400, "invalidPreference");
       }
 
       await setNotificationsEnabled(req.uid!, notifications);
 
-      return ok(res, describePreferences(notifications));
+      return ok(res, describePreferences(notifications, await resolveLocale(req)));
     } catch (err) {
       next(err);
     }
@@ -161,17 +163,18 @@ export function createApp(getAppUrl: () => string) {
     "/api/email/broadcast/recipients",
     authenticate,
     requireAdmin,
-    async (_req: AuthenticatedRequest, res, next) => {
+    async (req: AuthenticatedRequest, res, next) => {
       try {
-        const [users, optedOut] = await Promise.all([
+        const [users, optedOut, locale] = await Promise.all([
           db.collection("users").select("name", "email").get(),
           listOptedOutUids(),
+          resolveLocale(req),
         ]);
 
         const recipients = users.docs
           .map((doc) => ({
             uid: doc.id,
-            name: doc.get("name") || doc.get("email") || "Sem nome",
+            name: doc.get("name") || doc.get("email") || t(locale, "noName"),
             email: doc.get("email") ?? null,
             receivesEmail: !optedOut.has(doc.id),
           }))
@@ -194,26 +197,26 @@ export function createApp(getAppUrl: () => string) {
       const { subject, message, userIds } = req.body ?? {};
 
       if (typeof subject !== "string" || !subject.trim()) {
-        return fail(res, 400, "Informe o assunto do comunicado.");
+        return fail(req, res, 400, "subjectRequired");
       }
 
       if (subject.length > MAX_SUBJECT) {
-        return fail(res, 400, `O assunto pode ter no máximo ${MAX_SUBJECT} caracteres.`);
+        return fail(req, res, 400, "subjectTooLong", { max: MAX_SUBJECT });
       }
 
       if (typeof message !== "string" || !message.trim()) {
-        return fail(res, 400, "Escreva a mensagem do comunicado.");
+        return fail(req, res, 400, "messageRequired");
       }
 
       if (message.length > MAX_MESSAGE) {
-        return fail(res, 400, `A mensagem pode ter no máximo ${MAX_MESSAGE} caracteres.`);
+        return fail(req, res, 400, "messageTooLong", { max: MAX_MESSAGE });
       }
 
       if (
         userIds !== undefined &&
         (!Array.isArray(userIds) || userIds.length === 0 || !userIds.every((id) => typeof id === "string" && id.trim()))
       ) {
-        return fail(res, 400, "Escolha pelo menos um membro.");
+        return fail(req, res, 400, "chooseRecipients");
       }
 
       const audience: string[] = userIds
@@ -225,7 +228,7 @@ export function createApp(getAppUrl: () => string) {
       const skippedOptedOut = audience.length - recipients.length;
 
       if (recipients.length === 0) {
-        return fail(res, 400, "Nenhum dos membros escolhidos recebe e-mails de comunicado.");
+        return fail(req, res, 400, "noRecipientReceives");
       }
 
       const broadcastRef = db.collection("mail_broadcasts").doc();
@@ -250,11 +253,10 @@ export function createApp(getAppUrl: () => string) {
       }
       await writer.close();
 
-      const summary =
-        `Comunicado enviado: ${plural(recipients.length, "e-mail na fila", "e-mails na fila")}.` +
-        (skippedOptedOut > 0
-          ? ` ${plural(skippedOptedOut, "membro desativou", "membros desativaram")} os e-mails e não vai receber.`
-          : "");
+      const summary = t(await resolveLocale(req), "broadcastSummary", {
+        queued: recipients.length,
+        skipped: skippedOptedOut,
+      });
 
       return ok(
         res,
@@ -266,15 +268,15 @@ export function createApp(getAppUrl: () => string) {
     }
   });
 
-  app.use((_req: Request, res: Response) => fail(res, 404, "Rota não encontrada."));
+  app.use((req: Request, res: Response) => fail(req, res, 404, "routeNotFound"));
 
-  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     if (err?.type === "entity.parse.failed" || err?.type === "entity.too.large") {
-      return fail(res, 400, "Dados da requisição inválidos.");
+      return fail(req, res, 400, "invalidRequest");
     }
 
     logger.error(err);
-    return fail(res, 500, "Algo deu errado no servidor. Tente novamente em instantes.");
+    return fail(req, res, 500, "internalError");
   });
 
   return app;

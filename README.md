@@ -53,7 +53,10 @@ A coleção não tem regra no `firestore.rules`, então só o Admin SDK acessa.
 ## API (`emailApi`)
 
 Base: `https://<região>-<projeto>.cloudfunctions.net/emailApi`. Respostas no
-envelope `{ success: true, data }` / `{ success: false, message }` (pt-BR).
+envelope `{ success: true, data }` / `{ success: false, message }`. Mensagens e
+rótulos saem no idioma do membro (pt, en, es), com a mesma regra do frontend:
+`users/{uid}.locale` se for pt/es, senão o idioma do navegador (`Accept-Language`),
+senão inglês. O conteúdo dos e-mails continua em pt-BR.
 
 | Rota | Auth | Descrição |
 | --- | --- | --- |

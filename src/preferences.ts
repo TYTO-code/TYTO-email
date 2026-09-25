@@ -1,5 +1,6 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { db } from "./firebaseAdmin";
+import { Locale, t } from "./i18n";
 
 /**
  * Preferências de e-mail de cada membro, em `email_preferences/{uid}`.
@@ -24,15 +25,14 @@ export async function setNotificationsEnabled(uid: string, enabled: boolean) {
     .set({ notifications: enabled, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
 }
 
-/** Formato pronto para o frontend renderizar (rótulos e textos vêm daqui). */
-export function describePreferences(notificationsEnabled: boolean) {
+/** Formato pronto para o frontend renderizar (rótulos e textos vêm daqui, no idioma do membro). */
+export function describePreferences(notificationsEnabled: boolean, locale: Locale) {
   return {
     preferences: [
       {
         key: "notifications",
-        label: "Receber notificações por e-mail",
-        description:
-          "Notificações do app e comunicados do Conselho. Avisos sobre a sua conta (segurança, suspensão) são sempre enviados.",
+        label: t(locale, "notificationsLabel"),
+        description: t(locale, "notificationsDescription"),
         enabled: notificationsEnabled,
       },
     ],
