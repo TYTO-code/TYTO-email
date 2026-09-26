@@ -100,3 +100,10 @@ npm run serve      # emuladores de Functions + Firestore + Auth
 
 Nos emuladores, use `.env.local` (com `RESEND_API_URL` apontando para um servidor
 de teste, se quiser) e `.secret.local` com `RESEND_API_KEY=...`.
+
+## Contribuindo
+
+1. Crie uma branch a partir da `main`: `git checkout -b minha-feature`
+2. Faça commit das alterações: `git commit -m "Descrição da alteração"`
+3. Envie a branch: `git push origin minha-feature`
+4. Abra um Pull Request
