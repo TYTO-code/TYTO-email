@@ -27,7 +27,9 @@ export function suspensionEmail(input: { name: string; reason?: string | null; a
   const reasonText =
     input.reason === "negative_balance"
       ? "Seu saldo de Dracmas ficou negativo."
-      : "Sua conta foi suspensa pelo Conselho.";
+      : input.reason === "loan_default"
+        ? "Um empréstimo do Pote Nacional venceu sem saldo para a quitação. Assim que houver saldo, ele é cobrado automaticamente e sua conta volta a funcionar."
+        : "Sua conta foi suspensa pelo Conselho.";
 
   return renderLayout({
     subject: "Sua conta no TYTO.club foi suspensa",
