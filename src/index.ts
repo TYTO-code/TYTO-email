@@ -2,7 +2,7 @@ import { setGlobalOptions } from "firebase-functions/v2";
 import { onDocumentCreated, onDocumentUpdated } from "firebase-functions/v2/firestore";
 import { onRequest } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import { APP_URL, NOTIFICATION_EMAILS_PER_HOUR, RESEND_API_KEY, senderConfig } from "./config";
+import { APP_URL, NOTIFICATION_EMAILS_PER_HOUR, RATE_LIMIT_PEPPER, RESEND_API_KEY, senderConfig } from "./config";
 import { createApp } from "./http/app";
 import { processMailThrottled, sweepMailQueue } from "./mail/processor";
 import { handleNotificationCreated, handleUserCreated, handleUserUpdated } from "./triggers/handlers";
@@ -33,7 +33,10 @@ export const sendAccountStatusEmail = onDocumentUpdated("users/{uid}", (event) =
   )
 );
 
-export const emailApi = onRequest(createApp(() => APP_URL.value()));
+export const emailApi = onRequest(
+  { secrets: [RATE_LIMIT_PEPPER] },
+  createApp(() => APP_URL.value(), () => RATE_LIMIT_PEPPER.value())
+);
 
 // --- Consumidor: entrega pelo Resend, um por vez (limite de 2 req/s do Resend) ---
 

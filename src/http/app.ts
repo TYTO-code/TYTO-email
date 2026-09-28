@@ -68,7 +68,7 @@ const fail = async (
 
 const ok = (res: Response, data: unknown, status = 200) => res.status(status).json({ success: true, data });
 
-export function createApp(getAppUrl: () => string) {
+export function createApp(getAppUrl: () => string, getRateLimitPepper: () => string) {
   const app = express();
 
   // Atrás do proxy do Google: req.ip passa a ser o IP real do cliente.
@@ -93,9 +93,11 @@ export function createApp(getAppUrl: () => string) {
         return fail(req, res, 400, "invalidEmail");
       }
 
-      const withinIpLimit = await consumeQuota(`reset_ip_${hashKey(req.ip ?? "unknown")}`, RESET_PER_IP_PER_HOUR);
+      // O IP só vira chave de rate limit (HMAC, apagada pelo TTL); nunca é gravado nem logado.
+      const pepper = getRateLimitPepper();
+      const withinIpLimit = await consumeQuota(`reset_ip_${hashKey(req.ip ?? "unknown", pepper)}`, RESET_PER_IP_PER_HOUR);
       const withinEmailLimit =
-        withinIpLimit && (await consumeQuota(`reset_email_${hashKey(email)}`, RESET_PER_EMAIL_PER_HOUR));
+        withinIpLimit && (await consumeQuota(`reset_email_${hashKey(email, pepper)}`, RESET_PER_EMAIL_PER_HOUR));
 
       if (!withinIpLimit || !withinEmailLimit) {
         return fail(req, res, 429, "tooManyAttempts");
