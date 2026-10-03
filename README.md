@@ -83,11 +83,17 @@ Cada envio fica registrado em `mail_broadcasts`.
 
 1. Verifique o domínio `tyto.club` no Resend (registros DNS) e crie uma API key.
 2. `firebase functions:secrets:set RESEND_API_KEY`
+   e `firebase functions:secrets:set RATE_LIMIT_PEPPER` (qualquer valor aleatório longo,
+   ex.: `openssl rand -hex 32`). É a chave do HMAC que transforma IP e e-mail em chave de
+   rate limit, para que `mail_rate` não guarde nada reversível.
 3. `cp .env.example .env` e ajuste. **`FUNCTIONS_REGION` precisa ser a mesma
    localização do banco Firestore.**
 4. No Firebase Auth, adicione o domínio de `APP_URL` em "Domínios autorizados"
    (para o link de senha voltar ao login do app; sem isso ele usa a página padrão do Firebase).
 5. `npm install && npm run deploy`
+6. Crie a política de TTL do Firestore na coleção `mail_rate`, campo `expiresAt`
+   (Console do Google Cloud → Firestore → Time-to-live). Com ela, cada chave de rate
+   limit é apagada depois que a janela de 1 hora acaba; sem ela os documentos ficam.
 
 O codebase `tyto-email` é separado, então o deploy não mexe em outras functions do projeto.
 
@@ -99,7 +105,7 @@ npm run serve      # emuladores de Functions + Firestore + Auth
 ```
 
 Nos emuladores, use `.env.local` (com `RESEND_API_URL` apontando para um servidor
-de teste, se quiser) e `.secret.local` com `RESEND_API_KEY=...`.
+de teste, se quiser) e `.secret.local` com `RESEND_API_KEY=...` e `RATE_LIMIT_PEPPER=...`.
 
 ## Contribuindo
 

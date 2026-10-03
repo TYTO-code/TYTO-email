@@ -2,6 +2,11 @@ import { defineInt, defineSecret, defineString } from "firebase-functions/params
 import type { SenderConfig } from "./mail/types";
 
 export const RESEND_API_KEY = defineSecret("RESEND_API_KEY");
+/**
+ * Chave do HMAC que transforma IP e e-mail em chave de rate limit. Sem ela, o
+ * SHA-256 de um IPv4 se reverte por força bruta (são só 2^32 valores).
+ */
+export const RATE_LIMIT_PEPPER = defineSecret("RATE_LIMIT_PEPPER");
 export const MAIL_FROM = defineString("MAIL_FROM", { default: "TYTO.club <nao-responda@tyto.club>" });
 export const APP_URL = defineString("APP_URL", { default: "https://tyto.club" });
 export const NOTIFICATION_EMAILS_PER_HOUR = defineInt("NOTIFICATION_EMAILS_PER_HOUR", { default: 10 });
