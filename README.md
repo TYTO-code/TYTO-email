@@ -9,7 +9,7 @@ Firestore + [Resend](https://resend.com).
 notifications/{id} criada ─┐
 users/{uid} criado ────────┼─► mail/{mailId} (fila) ─► deliverMail ─► Resend
 users/{uid}.suspended muda ┤        ▲                     (1 por vez)
-POST /api/email/broadcast ─┘        └── sweepMail (a cada 10 min: novas tentativas)
+POST /api/email/broadcast ─┘        └── sweepMail (a cada 30 min: novas tentativas)
 ```
 
 | E-mail | Gatilho | Categoria |
@@ -38,7 +38,8 @@ ela devolve (inclusive rótulos das preferências e mensagens de resultado).
   `welcome_{uid}`...), reserva do doc por transação antes de enviar e
   `Idempotency-Key` no Resend.
 - **Novas tentativas:** erros temporários (rede, 429, 5xx) vão para `retry` com
-  espera crescente (5, 10, 20, 40 min), até 5 tentativas; depois `error`.
+  espera crescente (5, 10, 20, 40 min), até 5 tentativas; depois `error`. Como a
+  varredura roda a cada 30 min, cada tentativa sai até 30 min depois do horário marcado.
   O `sweepMail` também recupera envios travados e itens da fila cujo trigger se perdeu.
 
 ### Status de `mail/{mailId}`
@@ -94,6 +95,9 @@ Cada envio fica registrado em `mail_broadcasts`.
 6. Crie a política de TTL do Firestore na coleção `mail_rate`, campo `expiresAt`
    (Console do Google Cloud → Firestore → Time-to-live). Com ela, cada chave de rate
    limit é apagada depois que a janela de 1 hora acaba; sem ela os documentos ficam.
+7. Uma vez por projeto: `firebase functions:artifacts:setpolicy --location <FUNCTIONS_REGION>`.
+   Cada deploy guarda uma imagem de contêiner no Artifact Registry, cobrada por armazenamento;
+   a política apaga as imagens antigas (padrão: mais de 1 dia).
 
 O codebase `tyto-email` é separado, então o deploy não mexe em outras functions do projeto.
 
