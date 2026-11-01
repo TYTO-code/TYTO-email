@@ -45,8 +45,11 @@ export const deliverMail = onDocumentCreated(
   (event) => processMailThrottled(event.params.mailId, senderConfig())
 );
 
+// Rede de segurança (novas tentativas, envios travados, trigger perdido); a entrega normal é o
+// `deliverMail`. A cada 30 min em vez de 10: um terço das execuções e consultas, e as esperas
+// de nova tentativa (5 a 40 min) continuam na mesma ordem de grandeza.
 export const sweepMail = onSchedule(
-  { schedule: "every 10 minutes", secrets: [RESEND_API_KEY], timeoutSeconds: 540, maxInstances: 1 },
+  { schedule: "every 30 minutes", secrets: [RESEND_API_KEY], timeoutSeconds: 540, maxInstances: 1 },
   async () => {
     await sweepMailQueue(senderConfig());
   }
